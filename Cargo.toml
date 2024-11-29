@@ -1,0 +1,11 @@
+[package]
+name = "rust-beat"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+crossbeam = "0.8.4"
+enigo = "0.3.0"
+rgb = "0.8.50"
+screenshots = "0.8.10"
+xcap = "0.0.14"
