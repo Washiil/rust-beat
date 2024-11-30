@@ -125,7 +125,7 @@ fn consumer_main_loop(
         // Drain the channel and get the latest data
         if let Some(screen_data) = rx.try_iter().last() {
             // Process the received screen data
-            let index = (((((screen_data.height / 9) * screen_data.width) * 8)
+            let index = (((((screen_data.height / 18) * screen_data.width) * 16)
                 + (screen_data.width / 2))
                 + offset) as usize;
 
@@ -146,8 +146,21 @@ fn consumer_main_loop(
 
             // Note Color: 254, 226, 19
             if *red > 200 {
-                thread::sleep(Duration::from_millis(50));
-                press_key(&mut controller, key);
+                if key_down {
+                    
+                }
+                else {
+                    thread::sleep(Duration::from_millis(25));
+                    controller.key(Key::Unicode(key), Press);
+                    key_down = true;
+                    thread::sleep(Duration::from_millis(15));
+                }
+            }
+            else {
+                if key_down {
+                    controller.key(Key::Unicode(key), Release);
+                    key_down = false;
+                }
             }
             thread::sleep(Duration::from_millis(50));
         }
@@ -192,7 +205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         thread::spawn(move || producer_main_loop(consumers, producer_stop_signal));
 
     // Let the program run for 10 seconds before stopping
-    thread::sleep(Duration::from_secs(15));
+    thread::sleep(Duration::from_secs(145));
     stop_signal.store(true, Ordering::Relaxed);
 
     // Wait for threads to finish
@@ -202,20 +215,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     producer_handle.join().unwrap();
 
     Ok(())
-
-    // loop {
-    //     if let Ok(colors) = get_pixels() {
-    //         // Print all colors and check for matches
-    //         for (i, color) in colors.iter().enumerate() {
-    //             if color.r > 230 {
-    //                 if let Err(e) = press_key(&mut enigo, tracks[i]) {
-    //                     println!("Key press error: {}", e);
-    //                 }
-    //             }
-    //         }
-    //         // println!();
-    //     }
-
-    //     thread::sleep(Duration::from_millis(20));
-    // }
 }
