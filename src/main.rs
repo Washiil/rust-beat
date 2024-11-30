@@ -30,7 +30,7 @@ fn find_roblox_window() -> Result<Window, &'static str> {
 }
 
 #[derive(Clone)]
-struct ScreenData {
+struct ScreenData1 {
     height: i32,
     width: i32,
     pixels: Vec<u8>, // Owned buffer of RGBA pixels
@@ -38,9 +38,11 @@ struct ScreenData {
 
 // Producer: Captures screen data and sends it through the channel
 fn producer_main_loop(
-    consumers: Vec<Sender<ScreenData>>,
+    consumers: Vec<Sender<[[u8; 3]; 4]>>,
     stop_signal: Arc<std::sync::atomic::AtomicBool>,
 ) {
+    let offsets: [i32; 4] = [-150, -50, 50, 150];
+
     while !stop_signal.load(std::sync::atomic::Ordering::Relaxed) {
         match find_roblox_window() {
             Ok(window) => {
@@ -48,14 +50,20 @@ fn producer_main_loop(
                 let width = window.width() as i32;
                 match window.capture_image() {
                     Ok(buffer) => {
-                        let screen_data = ScreenData {
-                            height,
-                            width,
-                            pixels: buffer.to_vec(),
-                        };
+                        let buffer = buffer.to_vec();
+
+                        let index = (((height / 18) *width) * 16) + (width / 2);
+                        let mut pixels = [[0, 0, 0]; 4];
+
+                        for (i, off) in offsets.iter().enumerate() {
+                            let temp_index = ((index + off) * 4) as usize;
+                            pixels[i][0] = *buffer.get(temp_index).expect("Could not find colour.");
+                            pixels[i][1] = *buffer.get(temp_index + 1).expect("Could not find colour.");
+                            pixels[i][2] = *buffer.get(temp_index + 2).expect("Could not find colour.");
+                        }
 
                         for sender in &consumers {
-                            if let Err(err) = sender.send(screen_data.clone()) {
+                            if let Err(err) = sender.send(pixels) {
                                 eprintln!("Failed to send screen data: {}", err);
                                 break;
                             }
@@ -70,16 +78,14 @@ fn producer_main_loop(
                 eprintln!("Failed to find Roblox window: {}", err);
             }
         }
-        // Simulate 60 FPS (16ms per frame)
-        thread::sleep(Duration::from_millis(16));
     }
 }
 
 // Consumer: Processes the latest screen data
 fn consumer_main_loop(
-    rx: Receiver<ScreenData>,
+    rx: Receiver<[[u8; 3]; 4]>,
     stop_signal: Arc<AtomicBool>,
-    offset: i32,
+    index: usize,
     key: char,
     mut controller: Enigo,
 ) {
@@ -88,28 +94,8 @@ fn consumer_main_loop(
     while !stop_signal.load(Ordering::Relaxed) {
         // Drain the channel and get the latest data
         if let Some(screen_data) = rx.try_iter().last() {
-            // Process the received screen data
-            let index = (((((screen_data.height / 18) * screen_data.width) * 16)
-                + (screen_data.width / 2))
-                + offset) as usize;
-
-            let red = screen_data
-                .pixels
-                .get(index * 4)
-                .expect("Could not find colour!");
-            let green = screen_data
-                .pixels
-                .get((index * 4) + 1)
-                .expect("Could not find colour!");
-            let blue = screen_data
-                .pixels
-                .get((index * 4) + 2)
-                .expect("Could not find colour!");
-
-            // First condition is for single notes, second condition is for holds
-
             // Note Color: 254, 226, 19
-            if *red > 200 {
+            if screen_data[index][0] > 200 {
                 if key_down {
                 } else {
                     thread::sleep(Duration::from_millis(25));
@@ -123,7 +109,6 @@ fn consumer_main_loop(
                     key_down = false;
                 }
             }
-            thread::sleep(Duration::from_millis(50));
         }
 
         // Sleep briefly to avoid busy looping
@@ -133,7 +118,6 @@ fn consumer_main_loop(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tracks = ['d', 'f', 'j', 'k'];
-    let offsets: [i32; 4] = [-150, -50, 50, 150];
 
     println!("Starting color monitoring...");
     println!("Press Ctrl+C to stop");
@@ -142,11 +126,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stop_signal: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
     // Create channels for each consumer
-    let mut consumers: Vec<Sender<ScreenData>> = Vec::new();
+    let mut consumers: Vec<Sender<[[u8; 3]; 4]>> = Vec::new();
     let mut track_threads: Vec<thread::JoinHandle<()>> = Vec::new();
 
     for (i, track_id) in tracks.iter().enumerate() {
-        let (tx, rx): (Sender<ScreenData>, Receiver<ScreenData>) = unbounded();
+        let (tx, rx): (Sender<[[u8; 3]; 4]>, Receiver<[[u8; 3]; 4]>) = unbounded();
         consumers.push(tx);
 
         let enigo = Enigo::new(&Settings::default())?;
@@ -156,7 +140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Spawn a consumer thread for each track
         let handle = thread::spawn(move || {
-            consumer_main_loop(rx, consumer_stop_signal, offsets[i], key, enigo)
+            consumer_main_loop(rx, consumer_stop_signal, i, key, enigo)
         });
         track_threads.push(handle);
     }
