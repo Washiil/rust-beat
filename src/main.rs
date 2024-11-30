@@ -120,7 +120,7 @@ fn consumer_main_loop(
     mut controller: Enigo,
 ) {
     let mut key_down = false;
-    
+
     while !stop_signal.load(Ordering::Relaxed) {
         // Drain the channel and get the latest data
         if let Some(screen_data) = rx.try_iter().last() {
@@ -147,16 +147,13 @@ fn consumer_main_loop(
             // Note Color: 254, 226, 19
             if *red > 200 {
                 if key_down {
-                    
-                }
-                else {
+                } else {
                     thread::sleep(Duration::from_millis(25));
                     controller.key(Key::Unicode(key), Press);
                     key_down = true;
                     thread::sleep(Duration::from_millis(15));
                 }
-            }
-            else {
+            } else {
                 if key_down {
                     controller.key(Key::Unicode(key), Release);
                     key_down = false;
@@ -194,8 +191,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let key = *track_id;
 
         // Spawn a consumer thread for each track
-        let handle =
-            thread::spawn(move || consumer_main_loop(rx, consumer_stop_signal, offsets[i], key, enigo));
+        let handle = thread::spawn(move || {
+            consumer_main_loop(rx, consumer_stop_signal, offsets[i], key, enigo)
+        });
         track_threads.push(handle);
     }
 
@@ -204,15 +202,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let producer_handle =
         thread::spawn(move || producer_main_loop(consumers, producer_stop_signal));
 
-    // Let the program run for 10 seconds before stopping
-    thread::sleep(Duration::from_secs(145));
-    stop_signal.store(true, Ordering::Relaxed);
+    // Set up Ctrl+C handler
+    let shutdown_signal = Arc::clone(&stop_signal);
+    ctrlc::set_handler(move || {
+        println!("Ctrl+C detected, shutting down...");
+        shutdown_signal.store(true, Ordering::Relaxed);
+    })
+    .expect("Error setting Ctrl-C handler");
 
-    // Wait for threads to finish
+    // Wait for all threads to finish
     for t in track_threads {
-        t.join().unwrap();
+        t.join().expect("Error joining consumer thread");
     }
-    producer_handle.join().unwrap();
+    producer_handle
+        .join()
+        .expect("Error joining producer thread");
 
+    println!("All threads have shut down. Exiting.");
     Ok(())
 }
