@@ -7,7 +7,7 @@ use xcap::Window;
 
 use enigo::{
     Direction::{Click, Press, Release},
-    Enigo, InputError, Key, Keyboard, Mouse, Settings,
+    Enigo, InputError, Key, Keyboard, Settings,
 };
 use rgb::RGB8;
 use std::{thread, time::Duration};
@@ -34,42 +34,6 @@ struct ScreenData {
     height: i32,
     width: i32,
     pixels: Vec<u8>, // Owned buffer of RGBA pixels
-}
-
-// The bottom of the score line on the right is 66% of the way down the screen so essentially cut in thirds
-fn get_pixels() -> Result<Vec<RGB8>, Box<dyn std::error::Error>> {
-    // Get the primary screen
-    let roblox_win = find_roblox_window()?;
-
-    let height = roblox_win.height();
-    let width = roblox_win.width();
-
-    let mut tracks = Vec::with_capacity(4);
-
-    let image = roblox_win.capture_image()?;
-    let buffer = image.to_vec();
-    let rgba: Vec<&[u8]> = buffer.chunks_exact(4).collect();
-
-    let two_thirds = ((((height / 9) * width) * 6) + (roblox_win.width() / 2)) as i32;
-
-    let center_screen = ((height / 2) * width) + (roblox_win.width() / 2);
-    let quarter_screen = ((center_screen) + ((height / 6) * width)) as i32;
-
-    let offsets: [i32; 4] = [-130, -50, 50, 130];
-
-    for off in offsets {
-        let value = rgba[(two_thirds + off) as usize];
-        tracks.push(RGB8::new(value[0], value[1], value[2]));
-    }
-
-    Ok(tracks)
-}
-
-fn press_key(enigo: &mut Enigo, key: char) -> Result<(), InputError> {
-    enigo.key(Key::Unicode(key), Press)?;
-    thread::sleep(Duration::from_millis(15));
-    enigo.key(Key::Unicode(key), Release)?;
-    Ok(())
 }
 
 // Producer: Captures screen data and sends it through the channel
