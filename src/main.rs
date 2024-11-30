@@ -35,44 +35,34 @@ fn producer_main_loop(
     stop_signal: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let offsets: [i32; 4] = [-150, -50, 50, 150];
+    let mut pixels = [[0u8; 3]; 4];
 
     while !stop_signal.load(std::sync::atomic::Ordering::Relaxed) {
-        match find_roblox_window() {
-            Ok(window) => {
+        if let Ok(window) = find_roblox_window() {
+            if let Ok(buffer) = window.capture_image() {
+                let buffer = buffer.to_vec();
                 let height = window.height() as i32;
                 let width = window.width() as i32;
-                match window.capture_image() {
-                    Ok(buffer) => {
-                        let buffer = buffer.to_vec();
 
-                        let index = (((height / 36) * width) * 32) + (width / 2);
-                        let mut pixels = [[0, 0, 0]; 4];
-
-                        for (i, off) in offsets.iter().enumerate() {
-                            let temp_index = ((index + off) * 4) as usize;
-                            pixels[i][0] = *buffer.get(temp_index).expect("Could not find colour.");
-                            pixels[i][1] =
-                                *buffer.get(temp_index + 1).expect("Could not find colour.");
-                            pixels[i][2] =
-                                *buffer.get(temp_index + 2).expect("Could not find colour.");
-                        }
-
-                        for sender in &consumers {
-                            if let Err(err) = sender.send(pixels) {
-                                eprintln!("Failed to send screen data: {}", err);
-                                break;
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        eprintln!("Failed to capture image: {}", err);
+                // Calculate base index once
+                let base_index = ((height / 36) * width * 32) + (width / 2);
+                
+                // Use iterator for more efficient processing
+                for (pixel, &offset) in pixels.iter_mut().zip(offsets.iter()) {
+                    let idx = ((base_index + offset) * 4) as usize;
+                    if idx + 2 < buffer.len() {
+                        pixel.copy_from_slice(&buffer[idx..idx + 3]);
                     }
                 }
-            }
-            Err(err) => {
-                eprintln!("Failed to find Roblox window: {}", err);
+
+                // Send to all consumers using a single allocation
+                for sender in &consumers {
+                    let _ = sender.send(pixels);  // Ignore errors for speed
+                }
             }
         }
+        // Idk if I want this
+        thread::sleep(Duration::from_micros(100));
     }
 }
 
@@ -89,7 +79,7 @@ fn consumer_main_loop(
 
     while !stop_signal.load(Ordering::Relaxed) {
         // Drain the channel and get the latest data
-        if let Some(screen_data) = rx.try_iter().last() {
+        if let Ok(screen_data) = rx.try_recv() {
             // Note Color: 254, 226, 19
             if screen_data[index][0] > 220 {
                 if key_down {
