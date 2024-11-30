@@ -29,13 +29,6 @@ fn find_roblox_window() -> Result<Window, &'static str> {
         .cloned()
 }
 
-#[derive(Clone)]
-struct ScreenData1 {
-    height: i32,
-    width: i32,
-    pixels: Vec<u8>, // Owned buffer of RGBA pixels
-}
-
 // Producer: Captures screen data and sends it through the channel
 fn producer_main_loop(
     consumers: Vec<Sender<[[u8; 3]; 4]>>,
@@ -52,7 +45,7 @@ fn producer_main_loop(
                     Ok(buffer) => {
                         let buffer = buffer.to_vec();
 
-                        let index = (((height / 18) *width) * 16) + (width / 2);
+                        let index = (((height / 36) *width) * 32) + (width / 2);
                         let mut pixels = [[0, 0, 0]; 4];
 
                         for (i, off) in offsets.iter().enumerate() {
@@ -98,10 +91,8 @@ fn consumer_main_loop(
             if screen_data[index][0] > 200 {
                 if key_down {
                 } else {
-                    thread::sleep(Duration::from_millis(25));
                     controller.key(Key::Unicode(key), Press);
                     key_down = true;
-                    thread::sleep(Duration::from_millis(15));
                 }
             } else {
                 if key_down {
