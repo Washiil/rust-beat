@@ -5,7 +5,7 @@ use std::sync::{
     Arc,
 };
 use xcap::Window;
-use enigo::{Direction::{Click, Press, Release}, Keyboard, Enigo, Key, Settings};
+use enigo::{Direction::{Press, Release}, Keyboard, Enigo, Key, Settings};
 use std::{thread, time::Duration};
 
 // Cache the window reference to avoid repeated lookups
@@ -73,9 +73,6 @@ fn producer_main_loop(
                 }
             }
         }
-        
-        // Small sleep to prevent excessive CPU usage
-        thread::sleep(Duration::from_micros(100));
     }
 }
 
@@ -92,21 +89,22 @@ fn consumer_main_loop(
     let mut last_action_time = std::time::Instant::now();
 
     while !stop_signal.load(Ordering::Relaxed) {
-        if let Ok(screen_data) = rx.try_recv() {  // Use try_recv() instead of try_iter()
+        if let Ok(screen_data) = rx.try_recv() {
+            let del = note_delay.load(Ordering::Relaxed);
+            // Need to work on this delay calculation to handle the changes in the varied note delays while retaining the holds on long notes
             if screen_data[index][0] > 220 {
-                if !key_down && last_action_time.elapsed() >= Duration::from_millis(note_delay.load(Ordering::Relaxed)) {
+                if !key_down {
+                    thread::sleep(Duration::from_millis(del));
                     controller.key(Key::Unicode(key), Press);
                     key_down = true;
                     last_action_time = std::time::Instant::now();
                 }
-            } else if key_down {
+            } else if key_down && last_action_time.elapsed() >= Duration::from_millis(del) {
                 controller.key(Key::Unicode(key), Release);
                 key_down = false;
                 last_action_time = std::time::Instant::now();
             }
         }
-        
-        thread::sleep(Duration::from_micros(100));
     }
 }
 
