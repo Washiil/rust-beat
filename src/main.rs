@@ -46,7 +46,7 @@ fn producer_main_loop(
     stop_signal: Arc<AtomicBool>,
 ) {
     let mut window_cache = WindowCache::new();
-    let offsets: [i32; 4] = [-150, -50, 50, 150];
+    let offsets: [i32; 4] = [-143, -48, 48, 143];
     let mut pixels = [[0u8; 3]; 4];
     
     while !stop_signal.load(Ordering::Relaxed) {
@@ -57,7 +57,7 @@ fn producer_main_loop(
                 let buffer = buffer.to_vec();
                 
                 // Calculate base index once
-                let base_index = ((height / 36) * width * 32) + (width / 2);
+                let base_index = ((height / 72) * width * 69) + (width / 2);
                 
                 // Use iterator for more efficient processing
                 for (pixel, &offset) in pixels.iter_mut().zip(offsets.iter()) {
