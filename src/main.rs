@@ -111,57 +111,62 @@ fn producer_main_loop(
     }
 }
 
-// Consumer: Receives screen data and processes it
+// Consumer: Processes the latest screen data
 fn consumer_main_loop(
     rx: Receiver<ScreenData>,
-    stop_signal: Arc<std::sync::atomic::AtomicBool>,
+    stop_signal: Arc<AtomicBool>,
     offset: i32,
     key: char,
-    mut controller: Enigo
+    mut controller: Enigo,
 ) {
-    while !stop_signal.load(std::sync::atomic::Ordering::Relaxed) {
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(screen_data) => {
-                // Process the received screen data
+    let mut key_state = false;
 
-                // Two thirds down and centered
-                let index = (((((screen_data.height / 9) * screen_data.width) * 6)
-                    + (screen_data.width / 2))
-                    + offset) as usize;
+    while !stop_signal.load(Ordering::Relaxed) {
+        // Drain the channel and get the latest data
+        if let Some(screen_data) = rx.try_iter().last() {
+            // Process the received screen data
+            let index = (((((screen_data.height / 9) * screen_data.width) * 6)
+                + (screen_data.width / 2))
+                + offset) as usize;
 
-                let red = screen_data
-                    .pixels
-                    .get(index * 4)
-                    .expect("Could not find colour!");
-                let green = screen_data
-                    .pixels
-                    .get((index * 4) + 1)
-                    .expect("Could not find colour!");
-                let blue = screen_data
-                    .pixels
-                    .get((index * 4) + 2)
-                    .expect("Could not find colour!");
+            let red = screen_data
+                .pixels
+                .get(index * 4)
+                .expect("Could not find colour!");
+            let green = screen_data
+                .pixels
+                .get((index * 4) + 1)
+                .expect("Could not find colour!");
+            let blue = screen_data
+                .pixels
+                .get((index * 4) + 2)
+                .expect("Could not find colour!");
 
-                if *red > 200 {
-                    thread::sleep(Duration::from_millis(100));
-                    if let Err(err) = press_key(&mut controller, key) {
-                        eprintln!("An error occured pressing the {} key: {}", key, err);
-                    }
-                    else {
+            // First condition is for single notes, second condition is for holds
+            if *red > 200 || (*blue > 95 && *blue < 120) {
+                // 126, 112, 4
+                if key_state {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                else {
+                    if let Err(err) = controller.key(Key::Unicode(key), Press) {
+                        eprintln!("An error occurred pressing the {} key: {}", key, err);
+                    } else {
                         println!(
                             "({} : {}) Received pixel data: {}, {}, {}",
                             key, offset, red, green, blue
                         );
                     }
-
+                    thread::sleep(Duration::from_millis(75));
                 }
             }
-            Err(err) => {
-                // Timeout or disconnected channel; handle gracefully
-                if err.is_disconnected() {
-                    eprintln!("Channel disconnected");
-                    break;
+            else {
+                if key_state {
+                    if let Err(err) = controller.key(Key::Unicode(key), Release) {
+                        eprintln!("An error occured pressing {}: {}", key, err);
+                    }
                 }
+                thread::sleep(Duration::from_millis(10));
             }
         }
     }
@@ -170,8 +175,6 @@ fn consumer_main_loop(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tracks = ['d', 'f', 'j', 'k'];
     let offsets: [i32; 4] = [-130, -50, 50, 130];
-
-    let mut enigo = Enigo::new(&Settings::default())?;
 
     println!("Starting color monitoring...");
     println!("Press Ctrl+C to stop");
@@ -204,7 +207,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         thread::spawn(move || producer_main_loop(consumers, producer_stop_signal));
 
     // Let the program run for 10 seconds before stopping
-    thread::sleep(Duration::from_secs(10));
+    thread::sleep(Duration::from_secs(15));
     stop_signal.store(true, Ordering::Relaxed);
 
     // Wait for threads to finish
