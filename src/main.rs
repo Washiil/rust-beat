@@ -119,13 +119,13 @@ fn consumer_main_loop(
     key: char,
     mut controller: Enigo,
 ) {
-    let mut key_state = false;
-
+    let mut key_down = false;
+    
     while !stop_signal.load(Ordering::Relaxed) {
         // Drain the channel and get the latest data
         if let Some(screen_data) = rx.try_iter().last() {
             // Process the received screen data
-            let index = (((((screen_data.height / 9) * screen_data.width) * 6)
+            let index = (((((screen_data.height / 9) * screen_data.width) * 8)
                 + (screen_data.width / 2))
                 + offset) as usize;
 
@@ -143,38 +143,23 @@ fn consumer_main_loop(
                 .expect("Could not find colour!");
 
             // First condition is for single notes, second condition is for holds
-            if *red > 200 || (*blue > 95 && *blue < 120) {
-                // 126, 112, 4
-                if key_state {
-                    thread::sleep(Duration::from_millis(20));
-                }
-                else {
-                    if let Err(err) = controller.key(Key::Unicode(key), Press) {
-                        eprintln!("An error occurred pressing the {} key: {}", key, err);
-                    } else {
-                        println!(
-                            "({} : {}) Received pixel data: {}, {}, {}",
-                            key, offset, red, green, blue
-                        );
-                    }
-                    thread::sleep(Duration::from_millis(75));
-                }
+
+            // Note Color: 254, 226, 19
+            if *red > 200 {
+                thread::sleep(Duration::from_millis(50));
+                press_key(&mut controller, key);
             }
-            else {
-                if key_state {
-                    if let Err(err) = controller.key(Key::Unicode(key), Release) {
-                        eprintln!("An error occured pressing {}: {}", key, err);
-                    }
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
+            thread::sleep(Duration::from_millis(50));
         }
+
+        // Sleep briefly to avoid busy looping
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tracks = ['d', 'f', 'j', 'k'];
-    let offsets: [i32; 4] = [-130, -50, 50, 130];
+    let offsets: [i32; 4] = [-150, -50, 50, 150];
 
     println!("Starting color monitoring...");
     println!("Press Ctrl+C to stop");
