@@ -10,10 +10,10 @@ use parking_lot::{
     RwLockWriteGuard
 };
 
-use std::sync::{
+use std::{sync::{
     atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
     Arc,
-};
+}, time::Instant};
 use std::{thread, time::Duration};
 use xcap::Window;
 
@@ -39,6 +39,8 @@ impl TrackData {
 
 fn producer_v2(data: Arc<TrackData>, stop_signal: Arc<AtomicBool>) {
     let offsets: [i32; 4] = [-143, -48, 48, 143];
+    let mut timer = Instant::now();
+    let mut updates = 0;
 
     while !stop_signal.load(Ordering::Relaxed) {
         if let Ok(window) = find_roblox_window() {
@@ -52,9 +54,17 @@ fn producer_v2(data: Arc<TrackData>, stop_signal: Arc<AtomicBool>) {
 
                 for (i, offset) in offsets.iter().enumerate() {
                     let idx = ((base_index + offset) * 4) as usize;
-                    data.tracks[i].store(buffer[idx], Ordering::Relaxed);
+                    data.tracks[i].store(buffer[idx], Ordering::Release);
                 }
+
+                updates += 1;
             }
+        }
+
+        if timer.elapsed() > Duration::from_secs(5) {
+            println!("Thread (producer) {} updates/sec", updates / 5);
+            timer = Instant::now();
+            updates = 0;
         }
     }
     println!("Shuttind Down Producer Thread");
@@ -111,8 +121,12 @@ fn consumer_v2(
     let mut key_down = false;
     let mut last_action_time = std::time::Instant::now();
 
+    let mut timer = Instant::now();
+    let mut updates = 0;
+
     while !stop_signal.load(Ordering::Relaxed) {
-        let val = data.load(Ordering::Relaxed);
+        let val = data.load(Ordering::Acquire);
+        updates += 1;
         let delay = note_delay.load(Ordering::Relaxed);
 
         if val > 220 {
@@ -128,6 +142,14 @@ fn consumer_v2(
             last_action_time = std::time::Instant::now();
         }
 
+        if timer.elapsed() > Duration::from_secs(5) {
+            println!("Thread: ({}) {} read/sec", key, updates / 5);
+            timer = Instant::now();
+            updates = 0;
+        }
+
+        // This one thread sleep single handedly saves your cpu
+        thread::sleep(Duration::from_millis(1));
     }
 
     println!("Shuttind down track: {}", key);
