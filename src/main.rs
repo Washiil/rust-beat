@@ -1,36 +1,15 @@
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use device_query::{DeviceQuery, DeviceState, Keycode};
+use enigo::{
+    Direction::{Press, Release},
+    Enigo, Key, Keyboard, Settings,
+};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
-use xcap::Window;
-use enigo::{Direction::{Press, Release}, Keyboard, Enigo, Key, Settings};
 use std::{thread, time::Duration};
-
-// Cache the window reference to avoid repeated lookups
-struct WindowCache {
-    window: Option<Window>,
-    last_check: std::time::Instant,
-}
-
-impl WindowCache {
-    fn new() -> Self {
-        Self {
-            window: None,
-            last_check: std::time::Instant::now(),
-        }
-    }
-
-    fn get_window(&mut self) -> Result<&Window, &'static str> {
-        // Only refresh cache every second
-        if self.window.is_none() || self.last_check.elapsed() > Duration::from_secs(1) {
-            self.window = find_roblox_window().ok();
-            self.last_check = std::time::Instant::now();
-        }
-        self.window.as_ref().ok_or("Window not found")
-    }
-}
+use xcap::Window;
 
 fn find_roblox_window() -> Result<Window, &'static str> {
     Window::all()
@@ -40,25 +19,24 @@ fn find_roblox_window() -> Result<Window, &'static str> {
         .ok_or("Roblox is not open or the window could not be found")
 }
 
-// Optimized producer that uses pre-allocated buffers and more efficient pixel access
-fn producer_main_loop(
-    consumers: Vec<Sender<[[u8; 3]; 4]>>,
-    stop_signal: Arc<AtomicBool>,
-) {
-    let mut window_cache = WindowCache::new();
+fn producer_main_loop(consumers: Vec<Sender<[[u8; 3]; 4]>>, stop_signal: Arc<AtomicBool>) {
+    // Need to change this so that offsets update dynamically
     let offsets: [i32; 4] = [-143, -48, 48, 143];
+
+    // Implementing a double buffer
+    let mut pixel_buffer = [[1u8; 3]; 4];
     let mut pixels = [[0u8; 3]; 4];
-    
+
     while !stop_signal.load(Ordering::Relaxed) {
-        if let Ok(window) = window_cache.get_window() {
+        if let Ok(window) = find_roblox_window() {
             if let Ok(buffer) = window.capture_image() {
                 let height = window.height() as i32;
                 let width = window.width() as i32;
                 let buffer = buffer.to_vec();
-                
+
                 // Calculate base index once
                 let base_index = ((height / 72) * width * 69) + (width / 2);
-                
+
                 // Use iterator for more efficient processing
                 for (pixel, &offset) in pixels.iter_mut().zip(offsets.iter()) {
                     let idx = ((base_index + offset) * 4) as usize;
@@ -67,9 +45,14 @@ fn producer_main_loop(
                     }
                 }
 
-                // Send to all consumers using a single allocation
-                for sender in &consumers {
-                    let _ = sender.send(pixels);  // Ignore errors for speed
+                // Simple check that reduces redundant sends to our consumer threads
+                if pixels != pixel_buffer {
+                    pixel_buffer = pixels;
+                    for sender in &consumers {
+                        let _ = sender.send(pixels); // Ignore errors for speed
+                    }
+                } else {
+                    println!("No changes detected in frame data.");
                 }
             }
         }
@@ -95,12 +78,12 @@ fn consumer_main_loop(
             if screen_data[index][0] > 220 {
                 if !key_down {
                     thread::sleep(Duration::from_millis(del));
-                    controller.key(Key::Unicode(key), Press);
+                    let _ = controller.key(Key::Unicode(key), Press);
                     key_down = true;
                     last_action_time = std::time::Instant::now();
                 }
             } else if key_down && last_action_time.elapsed() >= Duration::from_millis(del) {
-                controller.key(Key::Unicode(key), Release);
+                let _ = controller.key(Key::Unicode(key), Release);
                 key_down = false;
                 last_action_time = std::time::Instant::now();
             }
@@ -135,20 +118,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let enigo = Enigo::new(&Settings::default())?;
 
         let handle = thread::spawn(move || {
-            consumer_main_loop(rx, consumer_stop_signal, consumer_note_delay, i, track_id, enigo)
+            consumer_main_loop(
+                rx,
+                consumer_stop_signal,
+                consumer_note_delay,
+                i,
+                track_id,
+                enigo,
+            )
         });
         track_threads.push(handle);
     }
 
     // Spawn producer thread with cloned stop signal
     let producer_stop_signal = Arc::clone(&stop_signal);
-    let producer_handle = thread::spawn(move || producer_main_loop(consumers, producer_stop_signal));
+    let producer_handle =
+        thread::spawn(move || producer_main_loop(consumers, producer_stop_signal));
 
     // Main control loop with improved key handling
     let mut previous_keys = Vec::with_capacity(4);
     while !stop_signal.load(Ordering::Relaxed) {
         let keys = device_state.get_keys();
-        
+
         for key in keys.iter() {
             if !previous_keys.contains(key) {
                 match key {
