@@ -51,12 +51,12 @@ fn producer_main_loop(consumers: Vec<Sender<[[u8; 3]; 4]>>, stop_signal: Arc<Ato
                     for sender in &consumers {
                         let _ = sender.send(pixels); // Ignore errors for speed
                     }
-                } else {
-                    println!("No changes detected in frame data.");
                 }
             }
         }
     }
+
+    println!("Shutting down producer.");
 }
 
 // Optimized consumer with better state management
@@ -89,13 +89,17 @@ fn consumer_main_loop(
             }
         }
     }
+
+    println!("Shuttind down track: {}", key);
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tracks = ['d', 'f', 'j', 'k'];
+
     let note_delay = Arc::new(AtomicU64::new(20));
-    let device_state = DeviceState::new();
     let stop_signal = Arc::new(AtomicBool::new(false));
+
+    let device_state = DeviceState::new();
 
     // Set up Ctrl+C handler
     let shutdown_signal = Arc::clone(&stop_signal);
