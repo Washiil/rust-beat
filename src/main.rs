@@ -4,8 +4,14 @@ use enigo::{
     Direction::{Press, Release},
     Enigo, Key, Keyboard, Settings,
 };
+use parking_lot::{
+    Mutex,
+    RwLock,
+    RwLockWriteGuard
+};
+
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
     Arc,
 };
 use std::{thread, time::Duration};
@@ -17,6 +23,41 @@ fn find_roblox_window() -> Result<Window, &'static str> {
         .into_iter()
         .find(|win| win.app_name() == "Roblox Game Client")
         .ok_or("Roblox is not open or the window could not be found")
+}
+
+struct TrackData {
+    tracks: [Arc<AtomicU8>; 4]
+}
+
+impl TrackData {
+    pub fn new() -> Self {
+        TrackData {
+            tracks: [Arc::new(AtomicU8::new(0)), Arc::new(AtomicU8::new(0)), Arc::new(AtomicU8::new(0)), Arc::new(AtomicU8::new(0))]
+        }
+    }
+}
+
+fn producer_v2(data: Arc<TrackData>, stop_signal: Arc<AtomicBool>) {
+    let offsets: [i32; 4] = [-143, -48, 48, 143];
+
+    while !stop_signal.load(Ordering::Relaxed) {
+        if let Ok(window) = find_roblox_window() {
+            if let Ok(buffer) = window.capture_image() {
+                let height = window.height() as i32;
+                let width = window.width() as i32;
+                let buffer = buffer.to_vec();
+
+                // Calculate base
+                let base_index = ((height / 72) * width * 69) + (width / 2);
+
+                for (i, offset) in offsets.iter().enumerate() {
+                    let idx = ((base_index + offset) * 4) as usize;
+                    data.tracks[i].store(buffer[idx], Ordering::Relaxed);
+                }
+            }
+        }
+    }
+    println!("Shuttind Down Producer Thread");
 }
 
 fn producer_main_loop(consumers: Vec<Sender<[[u8; 3]; 4]>>, stop_signal: Arc<AtomicBool>) {
@@ -57,6 +98,39 @@ fn producer_main_loop(consumers: Vec<Sender<[[u8; 3]; 4]>>, stop_signal: Arc<Ato
     }
 
     println!("Shutting down producer.");
+}
+
+fn consumer_v2(
+    data: Arc<AtomicU8>,
+    stop_signal: Arc<AtomicBool>,
+    note_delay: Arc<AtomicU64>,
+    index: usize,
+    key: char,
+    mut controller: Enigo,
+) {
+    let mut key_down = false;
+    let mut last_action_time = std::time::Instant::now();
+
+    while !stop_signal.load(Ordering::Relaxed) {
+        let val = data.load(Ordering::Relaxed);
+        let delay = note_delay.load(Ordering::Relaxed);
+
+        if val > 220 {
+            if !key_down {
+                thread::sleep(Duration::from_millis(delay));
+                let _ = controller.key(Key::Unicode(key), Press);
+                key_down = true;
+                last_action_time = std::time::Instant::now();
+            }
+        } else if key_down && last_action_time.elapsed() >= Duration::from_millis(delay) {
+            let _ = controller.key(Key::Unicode(key), Release);
+            key_down = false;
+            last_action_time = std::time::Instant::now();
+        }
+
+    }
+
+    println!("Shuttind down track: {}", key);
 }
 
 // Optimized consumer with better state management
@@ -109,21 +183,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     // Pre-allocate vectors
-    let mut consumers = Vec::with_capacity(tracks.len());
     let mut track_threads = Vec::with_capacity(tracks.len());
+
+    let track_data = Arc::new(TrackData::new());
 
     // Create channels and spawn consumer threads
     for (i, &track_id) in tracks.iter().enumerate() {
-        let (tx, rx) = unbounded();
-        consumers.push(tx);
-
         let consumer_stop_signal = Arc::clone(&stop_signal);
         let consumer_note_delay = Arc::clone(&note_delay);
+        let consumer_track_data = Arc::clone(&track_data.tracks[i]);
+        
         let enigo = Enigo::new(&Settings::default())?;
 
         let handle = thread::spawn(move || {
-            consumer_main_loop(
-                rx,
+            consumer_v2(
+                consumer_track_data,
                 consumer_stop_signal,
                 consumer_note_delay,
                 i,
@@ -137,7 +211,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn producer thread with cloned stop signal
     let producer_stop_signal = Arc::clone(&stop_signal);
     let producer_handle =
-        thread::spawn(move || producer_main_loop(consumers, producer_stop_signal));
+        thread::spawn(move || producer_v2(Arc::clone(&track_data), producer_stop_signal));
 
     // Main control loop with improved key handling
     let mut previous_keys = Vec::with_capacity(4);
