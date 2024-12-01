@@ -37,20 +37,48 @@ impl TrackData {
     }
 }
 
+struct WindowCache {
+    window: Option<Window>,
+    last_check: Instant,
+}
+
+impl WindowCache {
+    fn new() -> Self {
+        Self {
+            window: None,
+            last_check: Instant::now(),
+        }
+    }
+
+    fn get_window(&mut self) -> Option<Window> {
+        // Only check for window every 500ms
+        if self.window.is_none() || self.last_check.elapsed() > Duration::from_millis(500) {
+            self.window = Window::all()
+                .ok()?
+                .into_iter()
+                .find(|win| win.app_name() == "Roblox Game Client");
+            self.last_check = Instant::now();
+        }
+        self.window.clone()
+    }
+}
+
 fn producer_v2(data: Arc<TrackData>, stop_signal: Arc<AtomicBool>) {
     let offsets: [i32; 4] = [-143, -48, 48, 143];
+    let mut window_cache = WindowCache::new();
+
     let mut timer = Instant::now();
     let mut updates = 0;
 
     while !stop_signal.load(Ordering::Relaxed) {
-        if let Ok(window) = find_roblox_window() {
+        if let Some(window) = window_cache.get_window() {
             if let Ok(buffer) = window.capture_image() {
                 let height = window.height() as i32;
                 let width = window.width() as i32;
                 let buffer = buffer.to_vec();
 
                 // Calculate base
-                let base_index = ((height / 72) * width * 69) + (width / 2);
+                let base_index = (((height / 72) * width) * 71) + (width / 2);
 
                 for (i, offset) in offsets.iter().enumerate() {
                     let idx = ((base_index + offset) * 4) as usize;
@@ -86,7 +114,7 @@ fn producer_main_loop(consumers: Vec<Sender<[[u8; 3]; 4]>>, stop_signal: Arc<Ato
                 let buffer = buffer.to_vec();
 
                 // Calculate base index once
-                let base_index = ((height / 72) * width * 69) + (width / 2);
+                let base_index = (((height / 100) * width) * 99) + (width / 2);
 
                 // Use iterator for more efficient processing
                 for (pixel, &offset) in pixels.iter_mut().zip(offsets.iter()) {
@@ -114,46 +142,35 @@ fn consumer_v2(
     data: Arc<AtomicU8>,
     stop_signal: Arc<AtomicBool>,
     note_delay: Arc<AtomicU64>,
-    index: usize,
     key: char,
     mut controller: Enigo,
 ) {
     let mut key_down = false;
-    let mut last_action_time = std::time::Instant::now();
-
-    let mut timer = Instant::now();
-    let mut updates = 0;
+    let mut last_action_time = Instant::now();
+    
+    // Pre-calculate key once
+    let unicode_key = Key::Unicode(key);
 
     while !stop_signal.load(Ordering::Relaxed) {
         let val = data.load(Ordering::Acquire);
-        updates += 1;
         let delay = note_delay.load(Ordering::Relaxed);
 
+        let current_time = Instant::now();
         if val > 220 {
             if !key_down {
                 thread::sleep(Duration::from_millis(delay));
-                let _ = controller.key(Key::Unicode(key), Press);
+                let _ = controller.key(unicode_key, Press);
                 key_down = true;
-                last_action_time = std::time::Instant::now();
+                last_action_time = current_time;
             }
-        } else if key_down && last_action_time.elapsed() >= Duration::from_millis(delay) {
-            let _ = controller.key(Key::Unicode(key), Release);
+        } else if key_down {
+            let _ = controller.key(unicode_key, Release);
             key_down = false;
-            last_action_time = std::time::Instant::now();
+            last_action_time = current_time;
         }
-
-        if timer.elapsed() > Duration::from_secs(5) {
-            println!("Thread: ({}) {} read/sec", key, updates / 5);
-            timer = Instant::now();
-            updates = 0;
-        }
-
-        // This one thread sleep single handedly saves your cpu
-        thread::sleep(Duration::from_millis(1));
     }
-
-    println!("Shuttind down track: {}", key);
 }
+
 
 // Optimized consumer with better state management
 fn consumer_main_loop(
@@ -222,7 +239,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 consumer_track_data,
                 consumer_stop_signal,
                 consumer_note_delay,
-                i,
                 track_id,
                 enigo,
             )
