@@ -142,33 +142,31 @@ fn consumer_v2(
     data: Arc<AtomicU8>,
     stop_signal: Arc<AtomicBool>,
     note_delay: Arc<AtomicU64>,
+    operation_tracker: Arc<AtomicU64>,
     key: char,
     mut controller: Enigo,
 ) {
     let mut key_down = false;
-    let mut last_action_time = Instant::now();
-    
-    // Pre-calculate key once
     let unicode_key = Key::Unicode(key);
 
     while !stop_signal.load(Ordering::Relaxed) {
         let val = data.load(Ordering::Acquire);
         let delay = note_delay.load(Ordering::Relaxed);
 
-        let current_time = Instant::now();
         if val > 220 {
             if !key_down {
                 thread::sleep(Duration::from_millis(delay));
                 let _ = controller.key(unicode_key, Press);
                 key_down = true;
-                last_action_time = current_time;
             }
         } else if key_down {
             let _ = controller.key(unicode_key, Release);
             key_down = false;
-            last_action_time = current_time;
         }
+        operation_tracker.fetch_add(1, Ordering::Relaxed);
     }
+
+    println!("Shutting down track {}", key);
 }
 
 
@@ -211,6 +209,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let note_delay = Arc::new(AtomicU64::new(20));
     let stop_signal = Arc::new(AtomicBool::new(false));
+    let mut ops_per_sec: [Arc<AtomicU64>; 4] = [Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0))];
 
     let device_state = DeviceState::new();
 
@@ -221,17 +220,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         shutdown_signal.store(true, Ordering::Relaxed);
     })?;
 
-    // Pre-allocate vectors
+    let track_data = Arc::new(TrackData::new());
     let mut track_threads = Vec::with_capacity(tracks.len());
 
-    let track_data = Arc::new(TrackData::new());
-
-    // Create channels and spawn consumer threads
+    // Spawn consumer threads
     for (i, &track_id) in tracks.iter().enumerate() {
         let consumer_stop_signal = Arc::clone(&stop_signal);
         let consumer_note_delay = Arc::clone(&note_delay);
         let consumer_track_data = Arc::clone(&track_data.tracks[i]);
-        
+        let consumer_operation_tracker = Arc::clone(&ops_per_sec[i]);
         let enigo = Enigo::new(&Settings::default())?;
 
         let handle = thread::spawn(move || {
@@ -239,6 +236,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 consumer_track_data,
                 consumer_stop_signal,
                 consumer_note_delay,
+                consumer_operation_tracker,
                 track_id,
                 enigo,
             )
@@ -246,26 +244,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         track_threads.push(handle);
     }
 
-    // Spawn producer thread with cloned stop signal
-    let producer_stop_signal = Arc::clone(&stop_signal);
-    let producer_handle =
-        thread::spawn(move || producer_v2(Arc::clone(&track_data), producer_stop_signal));
+    let consumer_start_time = Instant::now();
 
-    // Main control loop with improved key handling
+    // Spawn producer thread
+    let producer_handle = thread::spawn({
+        let producer_stop_signal = Arc::clone(&stop_signal);
+        let producer_track_data = Arc::clone(&track_data);
+        move || producer_v2(producer_track_data, producer_stop_signal)
+    });
+
+    // Main control loop
     let mut previous_keys = Vec::with_capacity(4);
     while !stop_signal.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_secs(1));
         let keys = device_state.get_keys();
 
         for key in keys.iter() {
             if !previous_keys.contains(key) {
                 match key {
                     Keycode::Up => {
-                        let new_value = note_delay.fetch_add(1, Ordering::Relaxed);
-                        println!("Incremented to: {}", new_value + 1);
+                        let _ = note_delay.fetch_add(1, Ordering::Relaxed);
                     }
                     Keycode::Down => {
-                        let new_value = note_delay.fetch_sub(1, Ordering::Relaxed);
-                        println!("Decremented to: {}", new_value - 1);
+                        let _ = note_delay.fetch_sub(1, Ordering::Relaxed);
                     }
                     Keycode::Escape => {
                         stop_signal.store(true, Ordering::Relaxed);
@@ -275,6 +276,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+
+        print!("\r\x1B[2K");
+
+        println!("- Robeats Robot -");
+        println!("Delay: {}ms", note_delay.load(Ordering::Relaxed));
+        let seconds = consumer_start_time.elapsed().as_secs();
+        println!("Track [D]: {} reads/sec", ops_per_sec[0].load(Ordering::Relaxed) / seconds);
+        println!("Track [F]: {} reads/sec", ops_per_sec[1].load(Ordering::Relaxed) / seconds);
+        println!("Track [J]: {} reads/sec", ops_per_sec[2].load(Ordering::Relaxed) / seconds);
+        println!("Track [K]: {} reads/sec", ops_per_sec[3].load(Ordering::Relaxed) / seconds);
 
         previous_keys = keys;
         thread::sleep(Duration::from_millis(10));
