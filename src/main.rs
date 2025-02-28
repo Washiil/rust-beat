@@ -1,38 +1,36 @@
-use crossbeam::channel::{unbounded, Receiver, Sender};
 use device_query::{DeviceQuery, DeviceState, Keycode};
-use enigo::{
-    Direction::{Press, Release},
-    Enigo, Key, Keyboard, Settings,
-};
-use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
-
+use enigo::{Direction, Enigo, Key, Settings, Keyboard};
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
         Arc,
     },
-    time::Instant,
+    thread,
+    time::{Duration, Instant},
 };
-use std::{thread, time::Duration};
 use xcap::Window;
 
+// Constants
+const WINDOW_CHECK_INTERVAL: Duration = Duration::from_millis(500);
+const TRACK_KEYS: [char; 4] = ['d', 'f', 'j', 'k'];
+const TRACK_OFFSETS: [i32; 4] = [-143, -48, 48, 143];
+const ROBLOX_APP_NAME: &str = "Roblox Game Client";
+const PIXEL_THRESHOLD: u8 = 220;
+
+// Track data shared between threads
 struct TrackData {
     tracks: [Arc<AtomicU8>; 4],
 }
 
 impl TrackData {
-    pub fn new() -> Self {
-        TrackData {
-            tracks: [
-                Arc::new(AtomicU8::new(0)),
-                Arc::new(AtomicU8::new(0)),
-                Arc::new(AtomicU8::new(0)),
-                Arc::new(AtomicU8::new(0)),
-            ],
+    fn new() -> Self {
+        Self {
+            tracks: core::array::from_fn(|_| Arc::new(AtomicU8::new(0))),
         }
     }
 }
 
+// Window caching to avoid frequent lookups
 struct WindowCache {
     window: Option<Window>,
     last_check: Instant,
@@ -47,24 +45,23 @@ impl WindowCache {
     }
 
     fn get_window(&mut self) -> Option<Window> {
-        // Only check for window every 500ms
-        if self.window.is_none() || self.last_check.elapsed() > Duration::from_millis(500) {
+        if self.window.is_none() || self.last_check.elapsed() > WINDOW_CHECK_INTERVAL {
             self.window = Window::all()
                 .ok()?
                 .into_iter()
-                .find(|win| win.app_name() == "Roblox Game Client");
+                .find(|win| win.app_name() == ROBLOX_APP_NAME);
             self.last_check = Instant::now();
         }
         self.window.clone()
     }
 }
 
-fn producer_v2(
+// Producer thread that captures screen pixels
+fn producer(
     data: Arc<TrackData>,
     operation_tracker: Arc<AtomicU64>,
     stop_signal: Arc<AtomicBool>,
 ) {
-    let offsets: [i32; 4] = [-143, -48, 48, 143];
     let mut window_cache = WindowCache::new();
 
     while !stop_signal.load(Ordering::Relaxed) {
@@ -74,21 +71,27 @@ fn producer_v2(
                 let width = window.width() as i32;
                 let buffer = buffer.to_vec();
 
-                // Calculate base
+                // Calculate base position for tracking
                 let base_index = (((height / 72) * width) * 71) + (width / 2);
 
-                for (i, offset) in offsets.iter().enumerate() {
+                for (i, offset) in TRACK_OFFSETS.iter().enumerate() {
                     let idx = ((base_index + offset) * 4) as usize;
-                    data.tracks[i].store(buffer[idx], Ordering::Release);
+                    if idx < buffer.len() {
+                        data.tracks[i].store(buffer[idx], Ordering::Release);
+                    }
                 }
                 operation_tracker.fetch_add(1, Ordering::Relaxed);
             }
         }
+        
+        // Small sleep to prevent CPU hogging
+        thread::sleep(Duration::from_millis(1));
     }
-    println!("Shuttind Down Producer Thread");
+    println!("Shutting down producer thread");
 }
 
-fn consumer_v2(
+// Consumer thread that presses keys based on track data
+fn consumer_track(
     data: Arc<AtomicU8>,
     stop_signal: Arc<AtomicBool>,
     note_delay: Arc<AtomicU64>,
@@ -103,57 +106,98 @@ fn consumer_v2(
         let val = data.load(Ordering::Acquire);
         let delay = note_delay.load(Ordering::Relaxed);
 
-        if val > 220 {
+        if val > PIXEL_THRESHOLD {
             if !key_down {
                 thread::sleep(Duration::from_millis(delay));
-                let _ = controller.key(unicode_key, Press);
+                let _ = controller.key(unicode_key, Direction::Press);
                 key_down = true;
             }
         } else if key_down {
-            let _ = controller.key(unicode_key, Release);
+            let _ = controller.key(unicode_key, Direction::Release);
             key_down = false;
         }
         operation_tracker.fetch_add(1, Ordering::Relaxed);
+        
+        // Small sleep to prevent CPU hogging
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    // Ensure key is released on shutdown
+    if key_down {
+        let _ = controller.key(unicode_key, Direction::Release);
     }
 
     println!("Shutting down track {}", key);
 }
 
+// Setup the shared metrics
+struct Metrics {
+    note_delay: Arc<AtomicU64>,
+    stop_signal: Arc<AtomicBool>,
+    ops_per_sec: Vec<Arc<AtomicU64>>,
+}
+
+impl Metrics {
+    fn new() -> Self {
+        Self {
+            note_delay: Arc::new(AtomicU64::new(5)),
+            stop_signal: Arc::new(AtomicBool::new(false)),
+            ops_per_sec: (0..5).map(|_| Arc::new(AtomicU64::new(0))).collect(),
+        }
+    }
+    
+    fn increase_delay(&self) {
+        self.note_delay.fetch_add(1, Ordering::Relaxed);
+    }
+    
+    fn decrease_delay(&self) {
+        let current = self.note_delay.load(Ordering::Relaxed);
+        if current > 0 {
+            self.note_delay.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+    
+    fn request_stop(&self) {
+        self.stop_signal.store(true, Ordering::Relaxed);
+    }
+    
+    fn is_stopping(&self) -> bool {
+        self.stop_signal.load(Ordering::Relaxed)
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let tracks = ['d', 'f', 'j', 'k'];
-
-    let note_delay = Arc::new(AtomicU64::new(20));
-    let stop_signal = Arc::new(AtomicBool::new(false));
-    let mut ops_per_sec: [Arc<AtomicU64>; 5] = [
-        Arc::new(AtomicU64::new(0)),
-        Arc::new(AtomicU64::new(0)),
-        Arc::new(AtomicU64::new(0)),
-        Arc::new(AtomicU64::new(0)),
-        Arc::new(AtomicU64::new(0)),
-    ];
-
-    let device_state = DeviceState::new();
-
+    // Initialize metrics
+    let metrics = Metrics::new();
+    
     // Set up Ctrl+C handler
-    let shutdown_signal = Arc::clone(&stop_signal);
+    let shutdown_signal = Arc::clone(&metrics.stop_signal);
     ctrlc::set_handler(move || {
         println!("Ctrl+C detected, shutting down...");
         shutdown_signal.store(true, Ordering::Relaxed);
     })?;
 
     let track_data = Arc::new(TrackData::new());
-    let mut track_threads = Vec::with_capacity(tracks.len());
+    let mut track_threads = Vec::with_capacity(TRACK_KEYS.len());
 
-    // Spawn consumer threads
-    for (i, &track_id) in tracks.iter().enumerate() {
-        let consumer_stop_signal = Arc::clone(&stop_signal);
-        let consumer_note_delay = Arc::clone(&note_delay);
+    // Start the consumer threads for each track
+    for (i, &track_id) in TRACK_KEYS.iter().enumerate() {
+        let consumer_stop_signal = Arc::clone(&metrics.stop_signal);
+        let consumer_note_delay = Arc::clone(&metrics.note_delay);
         let consumer_track_data = Arc::clone(&track_data.tracks[i]);
-        let consumer_operation_tracker = Arc::clone(&ops_per_sec[i + 1]);
-        let enigo = Enigo::new(&Settings::default())?;
+        let consumer_operation_tracker = Arc::clone(&metrics.ops_per_sec[i + 1]);
+        
+        // Create keyboard controller
+        let enigo = match Enigo::new(&Settings::default()) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("Error creating keyboard controller: {}", e);
+                return Err(e.into());
+            }
+        };
 
         let handle = thread::spawn(move || {
-            consumer_v2(
+            consumer_track(
                 consumer_track_data,
                 consumer_stop_signal,
                 consumer_note_delay,
@@ -165,72 +209,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         track_threads.push(handle);
     }
 
-    let consumer_start_time = Instant::now();
+    let start_time = Instant::now();
 
-    // Spawn producer thread
-    let producer_handle = thread::spawn({
-        let producer_stop_signal = Arc::clone(&stop_signal);
+    // Start the producer thread
+    let producer_handle = {
+        let producer_stop_signal = Arc::clone(&metrics.stop_signal);
         let producer_track_data = Arc::clone(&track_data);
-        let producer_operation_tracker = Arc::clone(&ops_per_sec[0]);
+        let producer_operation_tracker = Arc::clone(&metrics.ops_per_sec[0]);
 
-        move || {
-            producer_v2(
+        thread::spawn(move || {
+            producer(
                 producer_track_data,
                 producer_operation_tracker,
                 producer_stop_signal,
             )
-        }
-    });
+        })
+    };
 
     // Main control loop
-    let mut previous_keys = Vec::with_capacity(4);
-    while !stop_signal.load(Ordering::Relaxed) {
-        thread::sleep(Duration::from_secs(1));
+    let device_state = DeviceState::new();
+    let mut previous_keys = Vec::new();
+    
+    while !metrics.is_stopping() {
+        thread::sleep(Duration::from_millis(100));
         let keys = device_state.get_keys();
 
+        // Process keyboard input
         for key in keys.iter() {
             if !previous_keys.contains(key) {
                 match key {
-                    Keycode::Up => {
-                        let _ = note_delay.fetch_add(1, Ordering::Relaxed);
-                    }
-                    Keycode::Down => {
-                        let _ = note_delay.fetch_sub(1, Ordering::Relaxed);
-                    }
+                    Keycode::Up => metrics.increase_delay(),
+                    Keycode::Down => metrics.decrease_delay(),
                     Keycode::Escape => {
-                        stop_signal.store(true, Ordering::Relaxed);
+                        metrics.request_stop();
                         break;
                     }
                     _ => {}
                 }
             }
         }
-
-        print!("\x1B[2J\x1B[1;1H");
-
-        println!("- Robeats Robot -");
-        println!("Delay: {}ms", note_delay.load(Ordering::Relaxed));
-
-        let seconds = consumer_start_time.elapsed().as_secs();
-
-        println!(
-            "Producer: {} writes/sec",
-            ops_per_sec[0].load(Ordering::Relaxed) / seconds
-        );
-
-        for (i, c) in tracks.iter().enumerate() {
-            println!(
-                "Track [{}]: {} reads/sec",
-                c,
-                ops_per_sec[i + 1].load(Ordering::Relaxed) / seconds
-            );
+        
+        // Update display every second
+        if start_time.elapsed().as_millis() % 1000 < 100 {
+            print_status(&metrics, &start_time, &TRACK_KEYS);
         }
-
-        thread::sleep(Duration::from_millis(10));
+        
         previous_keys = keys;
     }
 
-    // Wait for threads to finish
+    // Wait for all threads to finish
     for handle in track_threads {
         let _ = handle.join();
     }
@@ -238,4 +265,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Shutdown complete");
     Ok(())
+}
+
+// Display current status information
+fn print_status(metrics: &Metrics, start_time: &Instant, track_keys: &[char]) {
+    // Clear screen
+    print!("\x1B[2J\x1B[1;1H");
+
+    println!("- Robeats Robot -");
+    println!("Delay: {}ms", metrics.note_delay.load(Ordering::Relaxed));
+
+    let seconds = start_time.elapsed().as_secs().max(1); // Avoid division by zero
+
+    println!(
+        "Producer: {} writes/sec",
+        metrics.ops_per_sec[0].load(Ordering::Relaxed) / seconds
+    );
+
+    for (i, c) in track_keys.iter().enumerate() {
+        println!(
+            "Track [{}]: {} reads/sec",
+            c,
+            metrics.ops_per_sec[i + 1].load(Ordering::Relaxed) / seconds
+        );
+    }
 }
